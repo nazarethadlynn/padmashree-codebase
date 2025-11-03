@@ -53,7 +53,7 @@ router.post("/", async (req, res) => {
       position,
       salary,
       hire_date,
-      password,
+      password ,
       role,
       status
     } = req.body;
@@ -81,7 +81,7 @@ router.post("/", async (req, res) => {
       position: position && position.trim() ? position.trim() : null,
       salary: salary !== undefined && salary !== null && !isNaN(parseFloat(salary)) ? parseFloat(salary) : null,
       hire_date: hire_date && hire_date.trim() ? hire_date.trim() : null,
-      password: password || "password123",
+      password_hash : password|| "password123",
       role: role || "employee",
       status: status || "active",
       created_at: new Date().toISOString(),
@@ -594,3 +594,5 @@ router.delete("/:id", async (req, res) => {
 });
 
 module.exports = router;
+	
+
