@@ -1,4 +1,4 @@
-// routes/attendanceRoutes.js - UPDATED WITH REVERSE GEOCODING
+// routes/attendanceRoutes.js - FULLY CORRECTED & WORKING
 const express = require('express');
 const { body, validationResult, param } = require('express-validator');
 const supabase = require('../config/supabaseClient');
@@ -15,7 +15,6 @@ const OFFICE_LOCATION = {
 // Helper function to get IST time
 const getISTTime = () => {
   const now = new Date();
-  // Add 5.5 hours (330 minutes) for IST
   const istTime = new Date(now.getTime() + (330 * 60 * 1000));
   return istTime.toISOString();
 };
@@ -24,13 +23,12 @@ const getISTTime = () => {
 const getISTDate = () => {
   const now = new Date();
   const istTime = new Date(now.getTime() + (330 * 60 * 1000));
-  return istTime.toISOString().split('T')[0]; // YYYY-MM-DD format
+  return istTime.toISOString().split('T')[0];
 };
 
-// ✅ NEW: Helper function to get location name from coordinates
+// Helper function to get location name from coordinates
 const getLocationName = async (latitude, longitude) => {
   try {
-    // Using OpenStreetMap Nominatim (free reverse geocoding)
     const response = await fetch(
       `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&addressdetails=1&zoom=16`
     );
@@ -42,36 +40,29 @@ const getLocationName = async (latitude, longitude) => {
     const data = await response.json();
     
     if (data && data.display_name) {
-      // Extract useful parts from the full address
       const address = data.address;
       let locationParts = [];
       
-      // Add building/shop name if available
       if (address.building || address.shop || address.office) {
         locationParts.push(address.building || address.shop || address.office);
       }
       
-      // Add road/street
       if (address.road) {
         locationParts.push(address.road);
       }
       
-      // Add area/suburb
       if (address.suburb || address.neighbourhood) {
         locationParts.push(address.suburb || address.neighbourhood);
       }
       
-      // Add city
       if (address.city || address.town || address.village) {
         locationParts.push(address.city || address.town || address.village);
       }
       
-      // Add state
       if (address.state) {
         locationParts.push(address.state);
       }
       
-      // Return formatted location (first 3-4 parts to keep it concise)
       const formattedLocation = locationParts.slice(0, 3).join(', ');
       return formattedLocation || data.display_name.split(',').slice(0, 3).join(', ');
     }
@@ -85,8 +76,14 @@ const getLocationName = async (latitude, longitude) => {
 
 // Helper function to calculate distance using Haversine formula
 const calculateDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371e3; // Earth's radius in meters
-  const φ1 = lat1 * Math.PI / 180; // φ, λ in radians
+  // ✅ FIXED: Added null/undefined checks
+  if (!lat1 || !lon1 || !lat2 || !lon2 || isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2)) {
+    console.error('❌ Invalid coordinates for distance calculation:', { lat1, lon1, lat2, lon2 });
+    return 999999; // Return large distance for safety
+  }
+
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI / 180;
   const φ2 = lat2 * Math.PI / 180;
   const Δφ = (lat2 - lat1) * Math.PI / 180;
   const Δλ = (lon2 - lon1) * Math.PI / 180;
@@ -95,8 +92,7 @@ const calculateDistance = (lat1, lon1, lat2, lon2) => {
             Math.cos(φ1) * Math.cos(φ2) *
             Math.sin(Δλ/2) * Math.sin(Δλ/2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-
-  const distance = R * c; // Distance in meters
+  const distance = R * c;
   return Math.round(distance);
 };
 
@@ -116,52 +112,67 @@ const determineLocationType = (latitude, longitude) => {
   };
 };
 
-// Validation middleware for attendance
+// ✅ CORRECTED: Validation middleware
 const validateAttendance = [
-  body('user_id')
-    .isUUID(4)
-    .withMessage('Valid user ID is required (UUID format)'),
+  body('employee_id')
+    .trim()
+    .notEmpty()
+    .withMessage('Employee ID is required')
+    .isString()
+    .withMessage('Employee ID must be a string'),
   
   body('type')
+    .trim()
+    .notEmpty()
+    .withMessage('Type is required')
     .isIn(['check-in', 'check-out'])
     .withMessage('Type must be either check-in or check-out'),
   
   body('latitude')
+    .notEmpty()
+    .withMessage('Latitude is required')
     .isFloat({ min: -90, max: 90 })
     .withMessage('Valid latitude is required (-90 to 90)'),
   
   body('longitude')
+    .notEmpty()
+    .withMessage('Longitude is required')
     .isFloat({ min: -180, max: 180 })
     .withMessage('Valid longitude is required (-180 to 180)'),
   
   body('date')
     .optional()
-    .isISO8601({ strict: true })
+    .trim()
+    .matches(/^\d{4}-\d{2}-\d{2}$/)
     .withMessage('Valid date is required (YYYY-MM-DD format)'),
 
-  // Site attendance flag for explicit site check-ins
   body('is_site_attendance')
     .optional()
     .isBoolean()
     .withMessage('is_site_attendance must be boolean')
 ];
 
-// Validation middleware for UUID parameters
-const validateUUID = (paramName) => {
+// Validation middleware for ID parameters
+const validateEmployeeParam = (paramName) => {
   return [
     param(paramName)
-      .isUUID(4)
-      .withMessage(`Valid ${paramName} is required (UUID format)`)
+      .trim()
+      .notEmpty()
+      .withMessage(`Valid ${paramName} is required`)
   ];
 };
 
-// POST - Mark Attendance (Check-in/Check-out) - UPDATED WITH REVERSE GEOCODING
+// ========================================
+// POST - Mark Attendance (Check-in/Check-out)
+// ========================================
+// POST - Mark Attendance (Check-in/Check-out) - OFFICE AND SITE COMBINED
 router.post('/attendance', validateAttendance, async (req, res) => {
   try {
     console.log('📍 Processing attendance marking...');
     
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.error('❌ Validation errors:', errors.array());
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
@@ -169,43 +180,55 @@ router.post('/attendance', validateAttendance, async (req, res) => {
       });
     }
 
-    const { user_id, type, latitude, longitude, date, is_site_attendance } = req.body;
-    const attendanceDate = date || getISTDate(); // ✅ Use IST date
+    const { employee_id, type, latitude, longitude, date, is_site_attendance } = req.body;
+    const attendanceDate = date || getISTDate();
 
-    // Check if user exists
+    console.log('📍 Request received:', { 
+      employee_id, 
+      type, 
+      latitude, 
+      longitude, 
+      attendanceDate,
+      is_site_attendance: is_site_attendance || false
+    });
+
+    // Check if employee exists
     const { data: employee, error: employeeError } = await supabase
       .from('employees')
-      .select('id, name, employee_id')
-      .eq('id', user_id)
+      .select('id, name, employee_id, department, position')
+      .eq('employee_id', employee_id)
       .single();
 
     if (employeeError || !employee) {
       console.log('❌ Employee not found:', employeeError);
       return res.status(404).json({
         success: false,
-        message: 'Employee not found'
+        message: 'Employee not found',
+        details: `No employee found with ID: ${employee_id}`
       });
     }
 
+    console.log('✅ Employee found:', employee.name);
+
     // Determine location type and validate office attendance
     const locationInfo = determineLocationType(latitude, longitude);
-    
-    // ✅ NEW: Get location name from coordinates
     const locationName = await getLocationName(latitude, longitude);
+    const istTime = getISTTime();
     
-    const istTime = getISTTime(); // ✅ Get current IST time
     console.log('📍 Location Analysis:', {
       employee: employee.name,
-      location: locationInfo,
+      distance: locationInfo.distance,
+      isWithinOffice: locationInfo.isWithinOffice,
       coordinates: { latitude, longitude },
-      location_name: locationName, // ✅ Log location name
+      location_name: locationName,
       is_site_attendance: is_site_attendance || false,
-      ist_time: istTime // ✅ Log IST time
+      ist_time: istTime
     });
 
-    // STRICT OFFICE VALIDATION - Block attendance if not in office premises
+    // ✅ ENHANCED: FLEXIBLE LOCATION VALIDATION
+    // If NOT in office AND NOT marking as site attendance -> REJECT
     if (!locationInfo.isWithinOffice && !is_site_attendance) {
-      console.log(`⚠️ Employee ${employee.name} attempting to mark attendance outside office premises`);
+      console.log(`⚠️ Employee ${employee.name} attempting to mark attendance outside office premises (no site flag)`);
       return res.status(403).json({
         success: false,
         message: 'You are not in the office premises. Attendance can only be marked within 200 meters of the office location.',
@@ -225,21 +248,50 @@ router.post('/attendance', validateAttendance, async (req, res) => {
         instructions: [
           'Move closer to the office premises (within 200 meters)',
           'Ensure your GPS location is accurate',
-          'Contact admin if you need to mark site attendance'
-        ]
+          'OR set is_site_attendance=true to mark attendance from site location'
+        ],
+        hint: 'To mark site attendance, send: {"is_site_attendance": true}'
       });
     }
 
-    // If it's explicit site attendance, allow it but log appropriately
-    if (is_site_attendance && !locationInfo.isWithinOffice) {
-      console.log(`✅ Site attendance authorized for ${employee.name} at distance ${locationInfo.distance}m - Location: ${locationName}`);
+    // ✅ ENHANCED: Log site attendance authorization
+    if (is_site_attendance) {
+      const siteStatus = locationInfo.isWithinOffice 
+        ? `✅ Site attendance flag set (but employee IS within office - ${locationInfo.distance}m away)`
+        : `✅ Site attendance authorized for ${employee.name} at distance ${locationInfo.distance}m - Location: ${locationName}`;
+      console.log(siteStatus);
     }
 
-    // Check for duplicate attendance on the same day
+    // Check for ANY attendance on the same day (ONE-ATTENDANCE-PER-DAY ENFORCEMENT)
+    const { data: todayAttendance, error: todayError } = await supabase
+      .from('attendance')
+      .select('id, type, time, location_type')
+      .eq('employee_id', employee_id)
+      .eq('date', attendanceDate)
+      .order('time', { ascending: false })
+      .limit(1);
+
+    if (todayError) {
+      console.error('❌ Error checking today attendance:', todayError);
+    } else if (todayAttendance && todayAttendance.length > 0) {
+      console.log(`⚠️ Employee ${employee.name} already marked attendance today`);
+      return res.status(409).json({
+        success: false,
+        message: 'You have already marked attendance once today. Only one attendance per day is allowed.',
+        existing_attendance: {
+          type: todayAttendance[0].type,
+          time: todayAttendance[0].time,
+          location_type: todayAttendance[0].location_type
+        },
+        contact_admin: 'Contact admin to modify or delete previous attendance record'
+      });
+    }
+
+    // Check for duplicate attendance within 5 minutes (same type)
     const { data: existingAttendance, error: checkError } = await supabase
       .from('attendance')
       .select('id, type, time')
-      .eq('user_id', user_id)
+      .eq('employee_id', employee_id)
       .eq('date', attendanceDate)
       .eq('type', type)
       .order('created_at', { ascending: false });
@@ -249,10 +301,9 @@ router.post('/attendance', validateAttendance, async (req, res) => {
     } else if (existingAttendance && existingAttendance.length > 0) {
       const lastAttendance = existingAttendance[0];
       const lastTime = new Date(lastAttendance.time);
-      const now = new Date(istTime); // ✅ Compare with IST time
-      const timeDiff = (now.getTime() - lastTime.getTime()) / (1000 * 60); // minutes
+      const now = new Date(istTime);
+      const timeDiff = (now.getTime() - lastTime.getTime()) / (1000 * 60);
 
-      // Prevent marking same type within 5 minutes
       if (timeDiff < 5) {
         return res.status(409).json({
           success: false,
@@ -260,26 +311,32 @@ router.post('/attendance', validateAttendance, async (req, res) => {
           lastAttendance: {
             type: lastAttendance.type,
             time: lastAttendance.time
-          }
+          },
+          retry_after_seconds: Math.round((5 - timeDiff) * 60)
         });
       }
     }
 
-    // ✅ UPDATED: Insert attendance record with location name
+    // ✅ ENHANCED: Determine final location type
+    // If is_site_attendance=true, mark as SITE regardless of distance
+    // Otherwise, use calculated location type
+    const finalLocationType = is_site_attendance ? 'SITE' : locationInfo.locationType;
+
+    // Insert attendance record with real-time location
     const { data, error } = await supabase
       .from('attendance')
       .insert([
         {
-          user_id: user_id,
+          employee_id: employee_id,
           date: attendanceDate,
           type: type,
-          latitude: latitude,
-          longitude: longitude,
-          location_type: locationInfo.locationType, // Store OFFICE or SITE
-          location_name: locationName, // ✅ NEW: Store location name
-          time: istTime, // ✅ IST time
-          time_in: type === 'check-in' ? istTime : null, // ✅ IST time
-          created_at: istTime // ✅ IST time
+          latitude: latitude,  // ✅ Real-time GPS coordinates
+          longitude: longitude,  // ✅ Real-time GPS coordinates
+          location_type: finalLocationType,  // ✅ OFFICE or SITE
+          location_name: locationName,  // ✅ Geocoded address name
+          time: istTime,
+          time_in: type === 'check-in' ? istTime : null,
+          created_at: istTime
         }
       ])
       .select('*')
@@ -294,13 +351,18 @@ router.post('/attendance', validateAttendance, async (req, res) => {
       });
     }
 
-    const attendanceMessage = locationInfo.isWithinOffice 
-      ? `${type === 'check-in' ? 'Check-in' : 'Check-out'} marked successfully at OFFICE premises`
-      : `${type === 'check-in' ? 'Check-in' : 'Check-out'} marked successfully at SITE location`;
+    // ✅ ENHANCED: Dynamic message based on location
+    let attendanceMessage;
+    if (is_site_attendance) {
+      attendanceMessage = `${type === 'check-in' ? 'Check-in' : 'Check-out'} marked successfully at SITE location (${locationInfo.distance}m from office)`;
+    } else if (locationInfo.isWithinOffice) {
+      attendanceMessage = `${type === 'check-in' ? 'Check-in' : 'Check-out'} marked successfully at OFFICE premises`;
+    } else {
+      attendanceMessage = `${type === 'check-in' ? 'Check-in' : 'Check-out'} marked successfully`;
+    }
 
-    console.log(`✅ Attendance marked: ${employee.name} - ${type} (${data.location_type}) at ${locationName || 'Unknown location'} - IST: ${istTime}`);
+    console.log(`✅ Attendance marked: ${employee.name} - ${type} (${finalLocationType}) at ${locationName || 'Unknown location'} - IST: ${istTime}`);
 
-    // ✅ UPDATED: Success response with location name
     res.status(201).json({
       success: true,
       message: attendanceMessage,
@@ -309,22 +371,25 @@ router.post('/attendance', validateAttendance, async (req, res) => {
         employee: {
           id: employee.id,
           name: employee.name,
-          employee_id: employee.employee_id
+          employee_id: employee.employee_id,
+          department: employee.department,
+          position: employee.position
         },
         attendance: {
           date: data.date,
           type: data.type,
-          time: data.time, // ✅ This will be IST time
-          location_type: data.location_type,
-          location_name: data.location_name, // ✅ NEW: Include location name
+          time: data.time,
+          location_type: data.location_type,  // ✅ OFFICE or SITE
+          location_name: data.location_name,
           location: {
             coordinates: {
-              latitude: data.latitude,
-              longitude: data.longitude
+              latitude: data.latitude,  // ✅ Real GPS location visible to admin
+              longitude: data.longitude  // ✅ Real GPS location visible to admin
             },
-            distance_from_office: locationInfo.distance,
+            distance_from_office: locationInfo.distance,  // ✅ Distance calculation
             within_office_radius: locationInfo.isWithinOffice,
-            validation_status: locationInfo.isWithinOffice ? 'OFFICE_VALID' : 'SITE_AUTHORIZED'
+            validation_status: is_site_attendance ? 'SITE_ATTENDANCE' : 
+                              (locationInfo.isWithinOffice ? 'OFFICE_VALID' : 'SITE_AUTHORIZED')
           }
         }
       }
@@ -340,94 +405,62 @@ router.post('/attendance', validateAttendance, async (req, res) => {
   }
 });
 
-// POST - Site Attendance (Explicit route for site check-ins)
-router.post('/attendance/site', validateAttendance, async (req, res) => {
-  try {
-    console.log('📍 Processing SITE attendance marking...');
-    
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
-    }
-
-    // Force site attendance flag and process through main route
-    const modifiedBody = { ...req.body, is_site_attendance: true };
-    const modifiedReq = { ...req, body: modifiedBody };
-    
-    // Recursively call the main attendance route with site flag
-    return router.post('/attendance').call(this, modifiedReq, res);
-
-  } catch (error) {
-    console.error('❌ Error marking site attendance:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error'
-    });
-  }
-});
-
-// GET - Get all attendance records (Admin view) - UPDATED WITH LOCATION_NAME
+// ========================================
+// GET - Get all attendance records (Admin view)
+// ========================================
 router.get('/attendance', async (req, res) => {
   try {
     console.log('📋 Admin fetching all attendance records...');
     
     const { 
       date, 
-      user_id, 
+      employee_id, 
       type, 
-      location_type, // NEW: Filter by location type
+      location_type,
       limit = 50, 
       offset = 0,
       sort_by = 'time',
       sort_order = 'desc'
     } = req.query;
     
-    // ✅ UPDATED: Build query with employee details including location_name
     let query = supabase
       .from('attendance')
       .select(`
         *,
-        user:employees!user_id (
+        employee:employees!employee_id (
+          id,
           name,
           employee_id,
           email,
-          department
+          department,
+          position
         )
-      `);
+      `, { count: 'exact' });
     
-    // Apply filters
     if (date) {
       query = query.eq('date', date);
     }
     
-    if (user_id) {
-      query = query.eq('user_id', user_id);
+    if (employee_id) {
+      query = query.eq('employee_id', employee_id);
     }
     
     if (type && ['check-in', 'check-out'].includes(type)) {
       query = query.eq('type', type);
     }
 
-    // NEW: Filter by location type
     if (location_type && ['OFFICE', 'SITE'].includes(location_type)) {
       query = query.eq('location_type', location_type);
     }
     
-    // Apply sorting
     const validSortFields = ['time', 'date', 'created_at', 'type', 'location_type'];
     const sortField = validSortFields.includes(sort_by) ? sort_by : 'time';
     const sortAscending = sort_order.toLowerCase() === 'asc';
     
     query = query.order(sortField, { ascending: sortAscending });
-    
-    // Apply pagination
     query = query.range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
 
-    const { data, error } = await query;
+    const { data, error, count } = await query;
 
     if (error) {
       console.error('❌ Error fetching attendance records:', error);
@@ -438,7 +471,6 @@ router.get('/attendance', async (req, res) => {
       });
     }
 
-    // ✅ UPDATED: Enhance data with location names
     const enhancedRecords = data.map(record => {
       const locationInfo = determineLocationType(
         parseFloat(record.latitude), 
@@ -447,14 +479,12 @@ router.get('/attendance', async (req, res) => {
       
       return {
         ...record,
-        employee_name: record.user?.name || 'Unknown',
-        employee_id: record.user?.employee_id || 'Unknown',
-        department: record.user?.department || 'Unknown',
-        // Use database location_type as primary, fallback to calculated
-        location_type_stored: record.location_type || locationInfo.locationType,
-        location_name: record.location_name, // ✅ NEW: Include stored location name
+        employee_name: record.employee?.name || 'Unknown',
+        employee_id_display: record.employee?.employee_id || 'Unknown',
+        department: record.employee?.department || 'Unknown',
+        position: record.employee?.position || 'Unknown',
         location: {
-          type: record.location_type || locationInfo.locationType, // Prefer database value
+          type: record.location_type || locationInfo.locationType,
           distance_from_office: locationInfo.distance,
           within_office_radius: locationInfo.isWithinOffice,
           coordinates: {
@@ -475,11 +505,11 @@ router.get('/attendance', async (req, res) => {
       pagination: {
         limit: parseInt(limit),
         offset: parseInt(offset),
-        total: enhancedRecords.length
+        total: count
       },
       filters_applied: {
         date: date || 'all',
-        user_id: user_id || 'all',
+        employee_id: employee_id || 'all',
         type: type || 'all',
         location_type: location_type || 'all',
         sort_by: sortField,
@@ -495,14 +525,15 @@ router.get('/attendance', async (req, res) => {
   }
 });
 
-// GET - Get attendance summary/statistics - UPDATED WITH LOCATION_NAME
+// ========================================
+// GET - Get attendance summary/statistics
+// ========================================
 router.get('/attendance/admin/summary', async (req, res) => {
   try {
     console.log('📊 Admin fetching attendance summary...');
     
-    const today = getISTDate(); // ✅ Use IST date for today
+    const today = getISTDate();
     
-    // ✅ UPDATED: Get today's attendance with location names
     const { data: todayAttendance, error: todayError } = await supabase
       .from('attendance')
       .select('type, latitude, longitude, location_type, location_name')
@@ -516,7 +547,6 @@ router.get('/attendance/admin/summary', async (req, res) => {
       });
     }
 
-    // Calculate summary statistics using stored location_type
     const summary = {
       today: {
         total_records: todayAttendance.length,
@@ -527,10 +557,8 @@ router.get('/attendance/admin/summary', async (req, res) => {
       }
     };
 
-    // Analyze location types using database values
     todayAttendance.forEach(record => {
       if (record.type === 'check-in') {
-        // Use stored location_type first, fallback to calculation
         const locationType = record.location_type || 
           determineLocationType(
             parseFloat(record.latitude), 
@@ -545,7 +573,6 @@ router.get('/attendance/admin/summary', async (req, res) => {
       }
     });
 
-    // ✅ UPDATED: Get recent attendance records with location names
     const { data: recentRecords, error: recentError } = await supabase
       .from('attendance')
       .select(`
@@ -557,9 +584,11 @@ router.get('/attendance/admin/summary', async (req, res) => {
         longitude,
         location_type,
         location_name,
-        user:employees!user_id (
+        employee_id,
+        employee:employees!employee_id (
           name,
-          employee_id
+          employee_id,
+          department
         )
       `)
       .order('time', { ascending: false })
@@ -577,10 +606,9 @@ router.get('/attendance/admin/summary', async (req, res) => {
       
       return {
         ...record,
-        employee_name: record.user?.name || 'Unknown',
-        location_name: record.location_name, // ✅ NEW: Include location name
+        employee_name: record.employee?.name || 'Unknown',
         location: {
-          type: record.location_type || locationInfo.locationType, // Use stored value
+          type: record.location_type || locationInfo.locationType,
           distance_from_office: locationInfo.distance,
           validation_status: (record.location_type || locationInfo.locationType) === 'OFFICE' ? 'OFFICE_VALID' : 'SITE_ATTENDANCE'
         }
@@ -603,7 +631,8 @@ router.get('/attendance/admin/summary', async (req, res) => {
         validation_rules: {
           office_radius: `${OFFICE_LOCATION.radius} meters`,
           office_validation: 'STRICT - Must be within office premises',
-          site_attendance: 'Available via explicit site check-in'
+          site_attendance: 'Available via explicit site check-in',
+          daily_limit: 'ONE attendance per day - Employee cannot mark attendance more than once per day'
         }
       }
     });
@@ -617,10 +646,12 @@ router.get('/attendance/admin/summary', async (req, res) => {
   }
 });
 
-// GET - Get user's attendance records - UPDATED WITH LOCATION_NAME
-router.get('/attendance/user/:user_id', validateUUID('user_id'), async (req, res) => {
+// ========================================
+// GET - Get employee's attendance records
+// ========================================
+router.get('/attendance/employee/:employee_id', validateEmployeeParam('employee_id'), async (req, res) => {
   try {
-    console.log('👤 Fetching user attendance records...');
+    console.log('👤 Fetching employee attendance records...');
     
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -631,13 +662,22 @@ router.get('/attendance/user/:user_id', validateUUID('user_id'), async (req, res
       });
     }
 
-    const { user_id } = req.params;
+    const { employee_id } = req.params;
     const { date, type, limit = 30, offset = 0 } = req.query;
     
     let query = supabase
       .from('attendance')
-      .select('*') // This now includes location_type and location_name columns
-      .eq('user_id', user_id)
+      .select(`
+        *,
+        employee:employees!employee_id (
+          id,
+          name,
+          employee_id,
+          department,
+          position
+        )
+      `)
+      .eq('employee_id', employee_id)
       .order('time', { ascending: false });
     
     if (date) {
@@ -653,14 +693,13 @@ router.get('/attendance/user/:user_id', validateUUID('user_id'), async (req, res
     const { data, error } = await query;
 
     if (error) {
-      console.error('❌ Error fetching user attendance:', error);
+      console.error('❌ Error fetching employee attendance:', error);
       return res.status(500).json({
         success: false,
         message: 'Error fetching attendance records'
       });
     }
 
-    // ✅ UPDATED: Enhance with location information including location names
     const enhancedRecords = data.map(record => {
       const locationInfo = determineLocationType(
         parseFloat(record.latitude), 
@@ -669,9 +708,9 @@ router.get('/attendance/user/:user_id', validateUUID('user_id'), async (req, res
       
       return {
         ...record,
-        location_name: record.location_name, // ✅ NEW: Include location name
+        employee_name: record.employee?.name || 'Unknown',
         location: {
-          type: record.location_type || locationInfo.locationType, // Use stored value first
+          type: record.location_type || locationInfo.locationType,
           distance_from_office: locationInfo.distance,
           within_office_radius: locationInfo.isWithinOffice,
           validation_status: (record.location_type || locationInfo.locationType) === 'OFFICE' ? 'OFFICE_VALID' : 'SITE_ATTENDANCE'
@@ -679,7 +718,7 @@ router.get('/attendance/user/:user_id', validateUUID('user_id'), async (req, res
       };
     });
 
-    console.log(`✅ Found ${enhancedRecords.length} attendance records for user:`, user_id);
+    console.log(`✅ Found ${enhancedRecords.length} attendance records for employee:`, employee_id);
 
     res.json({
       success: true,
@@ -693,7 +732,7 @@ router.get('/attendance/user/:user_id', validateUUID('user_id'), async (req, res
     });
 
   } catch (error) {
-    console.error('❌ Error fetching user attendance:', error);
+    console.error('❌ Error fetching employee attendance:', error);
     res.status(500).json({
       success: false,
       message: 'Error fetching attendance records'
@@ -701,14 +740,15 @@ router.get('/attendance/user/:user_id', validateUUID('user_id'), async (req, res
   }
 });
 
-// GET - Get attendance for specific date - UPDATED WITH LOCATION_NAME
+// ========================================
+// GET - Get attendance for specific date
+// ========================================
 router.get('/attendance/date/:date', async (req, res) => {
   try {
     console.log('📅 Fetching attendance for specific date...');
     
     const { date } = req.params;
     
-    // Validate date format
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({
         success: false,
@@ -720,10 +760,12 @@ router.get('/attendance/date/:date', async (req, res) => {
       .from('attendance')
       .select(`
         *,
-        user:employees!user_id (
+        employee:employees!employee_id (
+          id,
           name,
           employee_id,
-          department
+          department,
+          position
         )
       `)
       .eq('date', date)
@@ -737,7 +779,6 @@ router.get('/attendance/date/:date', async (req, res) => {
       });
     }
 
-    // ✅ UPDATED: Enhance with location analysis including location names
     const enhancedRecords = data.map(record => {
       const locationInfo = determineLocationType(
         parseFloat(record.latitude), 
@@ -746,12 +787,12 @@ router.get('/attendance/date/:date', async (req, res) => {
       
       return {
         ...record,
-        employee_name: record.user?.name || 'Unknown',
-        employee_id: record.user?.employee_id || 'Unknown',
-        department: record.user?.department || 'Unknown',
-        location_name: record.location_name, // ✅ NEW: Include location name
+        employee_name: record.employee?.name || 'Unknown',
+        employee_id_display: record.employee?.employee_id || 'Unknown',
+        department: record.employee?.department || 'Unknown',
+        position: record.employee?.position || 'Unknown',
         location: {
-          type: record.location_type || locationInfo.locationType, // Use stored value
+          type: record.location_type || locationInfo.locationType,
           distance_from_office: locationInfo.distance,
           within_office_radius: locationInfo.isWithinOffice,
           validation_status: (record.location_type || locationInfo.locationType) === 'OFFICE' ? 'OFFICE_VALID' : 'SITE_ATTENDANCE'
@@ -759,14 +800,13 @@ router.get('/attendance/date/:date', async (req, res) => {
       };
     });
 
-    // Calculate daily statistics using stored location_type
     const stats = {
       total_records: enhancedRecords.length,
       check_ins: enhancedRecords.filter(r => r.type === 'check-in').length,
       check_outs: enhancedRecords.filter(r => r.type === 'check-out').length,
       office_checkins: enhancedRecords.filter(r => r.type === 'check-in' && (r.location_type || r.location.type) === 'OFFICE').length,
       site_checkins: enhancedRecords.filter(r => r.type === 'check-in' && (r.location_type || r.location.type) === 'SITE').length,
-      unique_employees: [...new Set(enhancedRecords.map(r => r.user_id))].length
+      unique_employees: [...new Set(enhancedRecords.map(r => r.employee_id))].length
     };
 
     console.log(`✅ Found ${enhancedRecords.length} attendance records for ${date}`);
@@ -784,6 +824,60 @@ router.get('/attendance/date/:date', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error fetching attendance records'
+    });
+  }
+});
+
+// ========================================
+// DELETE - Delete attendance record (Admin only)
+// ========================================
+router.delete('/attendance/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log(`🗑️ Deleting attendance record: ${id}`);
+
+    // Validate ID is numeric
+    if (!Number.isInteger(Number(id))) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid attendance ID format'
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('attendance')
+      .delete()
+      .eq('id', id)
+      .select();
+
+    if (error) {
+      console.error('❌ Error deleting attendance:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Error deleting attendance record'
+      });
+    }
+
+    if (!data || data.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance record not found'
+      });
+    }
+
+    console.log('✅ Attendance record deleted successfully');
+
+    res.json({
+      success: true,
+      message: 'Attendance record deleted successfully',
+      data: data[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error deleting attendance:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting attendance record'
     });
   }
 });

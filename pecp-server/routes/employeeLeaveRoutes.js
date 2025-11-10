@@ -1,618 +1,395 @@
-// routes/employeeLeaveRoutes.js
-const express = require('express');
-const { body, validationResult, param } = require('express-validator');
-const { createClient } = require('@supabase/supabase-js');
-
+// pecp-server/routes/employeeLeaveRoutes.js
+const express = require("express");
 const router = express.Router();
+const supabase = require("../config/supabaseClient");
 
-// Initialize Supabase (get from environment)
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+// ========================================
+// EMPLOYEE ROUTES
+// ========================================
 
-// Validation middleware for leave requests
-const validateLeaveRequest = [
-  body('user_id')
-    .isUUID(4)
-    .withMessage('Valid user ID is required (UUID format)'),
-  
-  body('from_date')
-    .isISO8601({ strict: true })
-    .withMessage('Valid start date is required (YYYY-MM-DD format)')
-    .custom((value) => {
-      const today = new Date();
-      const fromDate = new Date(value);
-      if (fromDate < today.setHours(0, 0, 0, 0)) {
-        throw new Error('Start date cannot be in the past');
-      }
-      return true;
-    }),
-  
-  body('to_date')
-    .isISO8601({ strict: true })
-    .withMessage('Valid end date is required (YYYY-MM-DD format)')
-    .custom((value, { req }) => {
-      const fromDate = new Date(req.body.from_date);
-      const toDate = new Date(value);
-      if (toDate < fromDate) {
-        throw new Error('End date must be after start date');
-      }
-      return true;
-    }),
-  
-  body('reason')
-    .trim()
-    .notEmpty()
-    .withMessage('Reason is required')
-    .isLength({ min: 10, max: 500 })
-    .withMessage('Reason must be between 10-500 characters'),
-  
-  body('comments')
-    .optional()
-    .isLength({ max: 1000 })
-    .withMessage('Comments cannot exceed 1000 characters')
-];
-
-// Validation middleware for status updates (Admin)
-const validateStatusUpdate = [
-  param('id')
-    .isUUID(4)
-    .withMessage('Valid leave request ID is required'),
-  
-  body('status')
-    .isIn(['approved', 'rejected'])
-    .withMessage('Status must be either approved or rejected'),
-  
-  body('reviewed_by')
-    .isUUID(4)
-    .withMessage('Valid reviewer ID is required'),
-  
-  body('comments')
-    .optional()
-    .isLength({ max: 1000 })
-    .withMessage('Comments cannot exceed 1000 characters')
-];
-
-// Validation middleware for UUID parameters
-const validateUUID = (paramName) => {
-  return [
-    param(paramName)
-      .isUUID(4)
-      .withMessage(`Valid ${paramName} is required (UUID format)`)
-  ];
-};
-
-// Helper function to calculate total days
-const calculateTotalDays = (fromDate, toDate) => {
-  const fromDateObj = new Date(fromDate);
-  const toDateObj = new Date(toDate);
-  const timeDifference = toDateObj.getTime() - fromDateObj.getTime();
-  return Math.ceil(timeDifference / (1000 * 3600 * 24)) + 1;
-};
-
-// CREATE - Submit new leave request
-router.post('/leave-requests', validateLeaveRequest, async (req, res) => {
+// 1️⃣ EMPLOYEE: Create Leave Request
+router.post("/employee/leave-request", async (req, res) => {
   try {
-    console.log('📝 Processing leave request submission...');
-    
-    // Check validation errors
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
+    console.log("📝 POST /api/employee/leave-request");
+    const { employee_id, leave_type, from_date, to_date, reason } = req.body;
+
+    if (!employee_id || !leave_type || !from_date || !to_date) {
       return res.status(400).json({
         success: false,
-        message: 'Validation failed',
-        errors: errors.array()
+        error: "Missing required fields"
       });
     }
 
-    const { user_id, from_date, to_date, reason, comments } = req.body;
-
-    // Check if user exists
-    const { data: employee, error: employeeError } = await supabase
-      .from('employees')
-      .select('id, name')
-      .eq('id', user_id)
+    const { data: employee } = await supabase
+      .from("employees")
+      .select("id")
+      .eq("id", parseInt(employee_id))
       .single();
 
-    if (employeeError || !employee) {
-      console.log('❌ Employee not found:', employeeError);
+    if (!employee) {
       return res.status(404).json({
         success: false,
-        message: 'Employee not found'
+        error: `Employee ${employee_id} not found`
       });
     }
 
-    // Check for overlapping leave requests
-    const { data: overlapping, error: overlapError } = await supabase
-      .from('leave_requests')
-      .select('id')
-      .eq('user_id', user_id)
-      .in('status', ['pending', 'approved'])
+    const validLeaveTypes = ["sick", "casual", "annual", "unpaid", "maternity", "paternity"];
+    if (!validLeaveTypes.includes(leave_type)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid leave_type`
+      });
+    }
+
+    const fromDateObj = new Date(from_date);
+    const toDateObj = new Date(to_date);
+
+    if (toDateObj < fromDateObj) {
+      return res.status(400).json({
+        success: false,
+        error: "To date cannot be before from date"
+      });
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (fromDateObj < today) {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot request leave for past dates"
+      });
+    }
+
+    const totalDays = Math.floor((toDateObj - fromDateObj) / (1000 * 60 * 60 * 24)) + 1;
+
+    const { data: conflictingLeaves } = await supabase
+      .from("leave_requests")
+      .select("id")
+      .eq("employee_id", parseInt(employee_id))
+      .in("status", ["pending", "approved"])
       .or(`and(from_date.lte.${to_date},to_date.gte.${from_date})`);
 
-    if (overlapError) {
-      console.error('Error checking overlapping requests:', overlapError);
-    } else if (overlapping && overlapping.length > 0) {
+    if (conflictingLeaves && conflictingLeaves.length > 0) {
       return res.status(409).json({
         success: false,
-        message: 'Overlapping leave request found. You already have a pending or approved leave during this period.'
+        error: "Leave already exists for these dates"
       });
     }
 
-    // Calculate total days
-    const totalDays = calculateTotalDays(from_date, to_date);
-
-    // Insert leave request
-    const { data, error } = await supabase
-      .from('leave_requests')
-      .insert([
-        {
-          user_id: user_id,
-          from_date: from_date,
-          to_date: to_date,
-          reason: reason,
-          comments: comments || null,
-          status: 'pending'
-        }
-      ])
-      .select('*')
+    const year = fromDateObj.getFullYear();
+    const { data: leaveBalance } = await supabase
+      .from("leave_balance")
+      .select("remaining_days")
+      .eq("employee_id", parseInt(employee_id))
+      .eq("year", year)
+      .eq("leave_type", leave_type)
       .single();
 
-    if (error) {
-      console.error('❌ Supabase insert error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to create leave request',
-        error: error.message
-      });
-    }
+    if (!leaveBalance) {
+      await supabase.from("leave_balance").insert([{
+        employee_id: parseInt(employee_id),
+        year,
+        leave_type,
+        total_allowed: 15,
+        used_days: 0,
+        remaining_days: 15
+      }]);
 
-    console.log('✅ Leave request created successfully:', data.id);
-
-    // Success response
-    res.status(201).json({
-      success: true,
-      message: 'Leave request submitted successfully',
-      data: {
-        id: data.id,
-        user_id: data.user_id,
-        from_date: data.from_date,
-        to_date: data.to_date,
-        reason: data.reason,
-        comments: data.comments,
-        status: data.status,
-        total_days: totalDays,
-        applied_date: data.applied_date,
-        created_at: data.created_at
+      if (totalDays > 15) {
+        return res.status(400).json({
+          success: false,
+          error: `Max 15 days per year. Requested: ${totalDays}`
+        });
       }
-    });
-
-  } catch (error) {
-    console.error('❌ Error creating leave request:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
-    });
-  }
-});
-
-// ADMIN - Get all leave requests (Fixed joins with proper syntax)
-router.get('/leave-requests', async (req, res) => {
-  try {
-    console.log('📋 Admin fetching all leave requests...');
-    
-    const { 
-      status, 
-      user_id, 
-      limit = 50, 
-      offset = 0,
-      sort_by = 'applied_date',
-      sort_order = 'desc'
-    } = req.query;
-    
-    // Build query with proper joins using foreign key relationships
-    let query = supabase
-      .from('leave_requests')
-      .select(`
-        *,
-        user:employees!user_id (
-          name,
-          employee_id,
-          email,
-          department
-        ),
-        reviewer:employees!reviewed_by (
-          name,
-          employee_id
-        )
-      `);
-    
-    // Apply filters
-    if (status && ['pending', 'approved', 'rejected'].includes(status)) {
-      query = query.eq('status', status);
-    }
-    
-    if (user_id) {
-      query = query.eq('user_id', user_id);
-    }
-    
-    // Apply sorting
-    const validSortFields = ['applied_date', 'from_date', 'to_date', 'status', 'created_at'];
-    const sortField = validSortFields.includes(sort_by) ? sort_by : 'applied_date';
-    const sortAscending = sort_order.toLowerCase() === 'asc';
-    
-    query = query.order(sortField, { ascending: sortAscending });
-    
-    // Apply pagination
-    query = query.range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('❌ Error fetching leave requests:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error fetching leave requests',
-        error: error.message
-      });
-    }
-
-    // Calculate total days and enhance data for admin view
-    const leaveRequests = data.map(request => ({
-      ...request,
-      total_days: calculateTotalDays(request.from_date, request.to_date),
-      employee_name: request.user?.name || 'Unknown',
-      employee_id: request.user?.employee_id || 'Unknown',
-      employee_email: request.user?.email || 'Unknown',
-      department: request.user?.department || 'Unknown',
-      reviewer_name: request.reviewer?.name || null
-    }));
-
-    console.log(`✅ Admin found ${leaveRequests.length} leave requests`);
-
-    res.json({
-      success: true,
-      message: `Found ${leaveRequests.length} leave request(s)`,
-      data: leaveRequests,
-      pagination: {
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        total: leaveRequests.length
-      },
-      filters_applied: {
-        status: status || 'all',
-        user_id: user_id || 'all',
-        sort_by: sortField,
-        sort_order: sort_order
+    } else {
+      if (totalDays > leaveBalance.remaining_days) {
+        return res.status(400).json({
+          success: false,
+          error: `Not enough balance. Requested: ${totalDays}, Remaining: ${leaveBalance.remaining_days}`
+        });
       }
-    });
-  } catch (error) {
-    console.error('❌ Error fetching leave requests:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching leave requests'
-    });
-  }
-});
-
-// ADMIN - Get leave requests summary/statistics
-router.get('/leave-requests/admin/summary', async (req, res) => {
-  try {
-    console.log('📊 Admin fetching leave requests summary...');
-    
-    // Get counts by status
-    const { data: statusCounts, error: statusError } = await supabase
-      .from('leave_requests')
-      .select('status')
-      .not('status', 'is', null);
-
-    if (statusError) {
-      console.error('❌ Error fetching status counts:', statusError);
-      return res.status(500).json({
-        success: false,
-        message: 'Error fetching summary data'
-      });
     }
 
-    // Calculate summary statistics
-    const summary = {
-      total_requests: statusCounts.length,
-      pending: statusCounts.filter(req => req.status === 'pending').length,
-      approved: statusCounts.filter(req => req.status === 'approved').length,
-      rejected: statusCounts.filter(req => req.status === 'rejected').length
-    };
-
-    // Get recent requests (last 5) with fixed join syntax
-    const { data: recentRequests, error: recentError } = await supabase
-      .from('leave_requests')
-      .select(`
-        id,
+    const { data: leaveRequest, error: insertError } = await supabase
+      .from("leave_requests")
+      .insert([{
+        employee_id: parseInt(employee_id),
+        leave_type,
         from_date,
         to_date,
-        status,
-        applied_date,
-        user:employees!user_id (
-          name,
-          employee_id
-        )
-      `)
-      .order('applied_date', { ascending: false })
-      .limit(5);
+        total_days: totalDays,
+        reason: reason || null,
+        status: "pending"
+      }])
+      .select()
+      .single();
 
-    if (recentError) {
-      console.error('❌ Error fetching recent requests:', recentError);
+    if (insertError) throw insertError;
+
+    res.status(201).json({
+      success: true,
+      message: "Leave request created",
+      data: leaveRequest
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// 2️⃣ EMPLOYEE: View All Previous Leaves
+router.get("/employee/leaves/:employee_id", async (req, res) => {
+  try {
+    const { employee_id } = req.params;
+    const { data, error } = await supabase
+      .from("leave_requests")
+      .select("*")
+      .eq("employee_id", parseInt(employee_id))
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      count: data.length,
+      data: data
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// 3️⃣ EMPLOYEE: View Single Leave (FIXED - NO relationship join)
+router.get("/employee/leave/:leave_id", async (req, res) => {
+  try {
+    const { leave_id } = req.params;
+    console.log(`🔍 GET /api/employee/leave/${leave_id}`);
+
+    const { data: leave, error } = await supabase
+      .from("leave_requests")
+      .select("*")
+      .eq("id", parseInt(leave_id))
+      .single();
+
+    if (error) {
+      return res.status(404).json({
+        success: false,
+        error: "Leave not found"
+      });
     }
 
-    const enhancedRecentRequests = (recentRequests || []).map(request => ({
-      ...request,
-      total_days: calculateTotalDays(request.from_date, request.to_date),
-      employee_name: request.user?.name || 'Unknown'
+    // Fetch employee separately
+    const { data: employee } = await supabase
+      .from("employees")
+      .select("id, employee_id, name, email, department")
+      .eq("id", leave.employee_id)
+      .single();
+
+    res.json({
+      success: true,
+      data: {
+        ...leave,
+        employee: employee || {}
+      }
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// 4️⃣ EMPLOYEE: Check Leave Balance
+router.get("/employee/leave-balance/:employee_id", async (req, res) => {
+  try {
+    const { employee_id } = req.params;
+    const { year } = req.query;
+    const currentYear = year || new Date().getFullYear();
+
+    const { data, error } = await supabase
+      .from("leave_balance")
+      .select("*")
+      .eq("employee_id", parseInt(employee_id))
+      .eq("year", parseInt(currentYear));
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      year: parseInt(currentYear),
+      data: data || []
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// ========================================
+// ADMIN ROUTES
+// ========================================
+
+ 
+
+// 6️⃣ ADMIN: View Single Leave by ID (FIXED - NO relationship join)
+router.get("/admin/leave/:leave_id", async (req, res) => {
+  try {
+    const { leave_id } = req.params;
+    console.log(`🔍 GET /api/admin/leave/${leave_id}`);
+
+    const { data: leave, error } = await supabase
+      .from("leave_requests")
+      .select("*")
+      .eq("id", parseInt(leave_id))
+      .single();
+
+    if (error) {
+      return res.status(404).json({
+        success: false,
+        error: "Leave not found"
+      });
+    }
+
+    // Fetch employee separately
+    const { data: employee } = await supabase
+      .from("employees")
+      .select("id, employee_id, name, email, department, position")
+      .eq("id", leave.employee_id)
+      .single();
+
+    res.json({
+      success: true,
+      data: {
+        ...leave,
+        employee: employee || {}
+      }
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+// 7️⃣ ADMIN: View All Leaves of Single Employee (FIXED - NO relationship join)
+router.get("/admin/employee/:employee_id/leaves", async (req, res) => {
+  try {
+    const { employee_id } = req.params;
+    console.log(`📋 GET /api/admin/employee/${employee_id}/leaves`);
+
+    const { data: leaves, error } = await supabase
+      .from("leave_requests")
+      .select("*")
+      .eq("employee_id", parseInt(employee_id))
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    // Fetch employee details
+    const { data: employee } = await supabase
+      .from("employees")
+      .select("id, employee_id, name, email, department")
+      .eq("id", parseInt(employee_id))
+      .single();
+
+    const enrichedLeaves = leaves.map(leave => ({
+      ...leave,
+      employee: employee || {}
     }));
 
-    console.log('✅ Admin summary data fetched successfully');
-
+    console.log(`✅ Fetched ${enrichedLeaves.length} leaves`);
     res.json({
       success: true,
-      message: 'Leave requests summary fetched successfully',
-      data: {
-        summary,
-        recent_requests: enhancedRecentRequests
-      }
+      count: enrichedLeaves.length,
+      data: enrichedLeaves
     });
-
-  } catch (error) {
-    console.error('❌ Error fetching admin summary:', error);
+  } catch (err) {
     res.status(500).json({
       success: false,
-      message: 'Error fetching summary data'
+      error: err.message
     });
   }
 });
 
-// Get specific leave request by ID (for detailed view)
-router.get('/leave-requests/:id', validateUUID('id'), async (req, res) => {
+// 8️⃣ ADMIN: Approve Leave Request
+router.put("/admin/leave/:leave_id/approve", async (req, res) => {
   try {
-    console.log('🔍 Fetching specific leave request...');
-    
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
-    }
+    const { leave_id } = req.params;
+    const { admin_comment } = req.body;
 
-    const { id } = req.params;
-    
-    const { data, error } = await supabase
-      .from('leave_requests')
-      .select(`
-        *,
-        user:employees!user_id (
-          name,
-          employee_id,
-          email,
-          department
-        ),
-        reviewer:employees!reviewed_by (
-          name,
-          employee_id
-        )
-      `)
-      .eq('id', id)
-      .single();
-
-    if (error || !data) {
-      console.log('❌ Leave request not found:', error);
-      return res.status(404).json({
-        success: false,
-        message: 'Leave request not found'
-      });
-    }
-
-    console.log('✅ Leave request fetched successfully:', id);
-
-    res.json({
-      success: true,
-      data: {
-        ...data,
-        total_days: calculateTotalDays(data.from_date, data.to_date),
-        employee_name: data.user?.name || 'Unknown',
-        employee_id: data.user?.employee_id || 'Unknown',
-        employee_email: data.user?.email || 'Unknown',
-        department: data.user?.department || 'Unknown',
-        reviewer_name: data.reviewer?.name || null
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error fetching leave request:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching leave request'
-    });
-  }
-});
-
-// ADMIN - Update leave request status (Approve/Reject) - Fixed
-router.patch('/leave-requests/:id/status', validateStatusUpdate, async (req, res) => {
-  try {
-    console.log('🔄 Admin updating leave request status...');
-    
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
-    }
-
-    const { id } = req.params;
-    const { status, reviewed_by, comments } = req.body;
-
-    // Check if leave request exists
-    const { data: existingRequest, error: fetchError } = await supabase
-      .from('leave_requests')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (fetchError || !existingRequest) {
-      console.log('❌ Leave request not found:', fetchError);
-      return res.status(404).json({
-        success: false,
-        message: 'Leave request not found'
-      });
-    }
-
-    if (existingRequest.status !== 'pending') {
-      return res.status(400).json({
-        success: false,
-        message: `Leave request is already ${existingRequest.status} and cannot be modified`
-      });
-    }
-
-    // Check if reviewer exists
-    const { data: reviewer, error: reviewerError } = await supabase
-      .from('employees')
-      .select('id, name')
-      .eq('id', reviewed_by)
-      .single();
-
-    if (reviewerError || !reviewer) {
-      console.log('❌ Reviewer not found:', reviewerError);
-      return res.status(404).json({
-        success: false,
-        message: 'Reviewer not found'
-      });
-    }
-
-    // Update leave request status
-    const { data, error } = await supabase
-      .from('leave_requests')
+    const { data: leave, error } = await supabase
+      .from("leave_requests")
       .update({
-        status: status,
-        reviewed_by: reviewed_by,
-        reviewed_date: new Date().toISOString(),
-        comments: comments || existingRequest.comments,
-        updated_at: new Date().toISOString()
+        status: "approved",
+        admin_comment: admin_comment || null
       })
-      .eq('id', id)
-      .select(`
-        *,
-        user:employees!user_id (
-          name,
-          employee_id
-        ),
-        reviewer:employees!reviewed_by (
-          name,
-          employee_id
-        )
-      `)
+      .eq("id", parseInt(leave_id))
+      .select("*")
       .single();
 
-    if (error) {
-      console.error('❌ Supabase update error:', error);
-      return res.status(500).json({
+    if (error) throw error;
+    if (!leave) {
+      return res.status(404).json({
         success: false,
-        message: 'Failed to update leave request',
-        error: error.message
+        error: "Leave not found"
       });
     }
 
-    console.log(`✅ Leave request ${status} successfully:`, id);
-
     res.json({
       success: true,
-      message: `Leave request ${status} successfully`,
-      data: {
-        ...data,
-        total_days: calculateTotalDays(data.from_date, data.to_date),
-        employee_name: data.user?.name || 'Unknown',
-        reviewer_name: data.reviewer?.name || 'Unknown'
-      }
+      message: "Leave approved",
+      data: leave
     });
-
-  } catch (error) {
-    console.error('❌ Error updating leave request status:', error);
+  } catch (err) {
     res.status(500).json({
       success: false,
-      message: 'Error updating leave request status'
+      error: err.message
     });
   }
 });
 
-// Get user's leave requests
-router.get('/leave-requests/user/:user_id', validateUUID('user_id'), async (req, res) => {
+// 9️⃣ ADMIN: Reject Leave Request
+router.put("/admin/leave/:leave_id/reject", async (req, res) => {
   try {
-    console.log('👤 Fetching user leave requests...');
-    
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
+    const { leave_id } = req.params;
+    const { admin_comment } = req.body;
+
+    const { data: leave, error } = await supabase
+      .from("leave_requests")
+      .update({
+        status: "rejected",
+        admin_comment: admin_comment || null
+      })
+      .eq("id", parseInt(leave_id))
+      .select("*")
+      .single();
+
+    if (error) throw error;
+    if (!leave) {
+      return res.status(404).json({
         success: false,
-        message: 'Validation failed',
-        errors: errors.array()
+        error: "Leave not found"
       });
     }
-
-    const { user_id } = req.params;
-    const { status, limit = 20, offset = 0 } = req.query;
-    
-    let query = supabase
-      .from('leave_requests')
-      .select(`
-        *,
-        reviewer:employees!reviewed_by (
-          name,
-          employee_id
-        )
-      `)
-      .eq('user_id', user_id)
-      .order('applied_date', { ascending: false });
-    
-    if (status && ['pending', 'approved', 'rejected'].includes(status)) {
-      query = query.eq('status', status);
-    }
-    
-    query = query.range(parseInt(offset), parseInt(offset) + parseInt(limit) - 1);
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('❌ Error fetching user leave requests:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Error fetching leave requests'
-      });
-    }
-
-    // Calculate total days for each request
-    const leaveRequests = data.map(request => ({
-      ...request,
-      total_days: calculateTotalDays(request.from_date, request.to_date),
-      reviewer_name: request.reviewer?.name || null
-    }));
-
-    console.log(`✅ Found ${leaveRequests.length} leave requests for user:`, user_id);
 
     res.json({
       success: true,
-      message: `Found ${leaveRequests.length} leave request(s)`,
-      data: leaveRequests,
-      pagination: {
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        total: leaveRequests.length
-      }
+      message: "Leave rejected",
+      data: leave
     });
-
-  } catch (error) {
-    console.error('❌ Error fetching user leave requests:', error);
+  } catch (err) {
     res.status(500).json({
       success: false,
-      message: 'Error fetching leave requests'
+      error: err.message
     });
   }
 });
