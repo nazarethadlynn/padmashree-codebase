@@ -4,19 +4,24 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
+
 const app = express();
 const PORT = process.env.PORT || 3001;
+
 
 // Supabase configuration
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
+
 
 if (!supabaseUrl || !supabaseKey) {
   console.error('Missing Supabase environment variables');
   process.exit(1);
 }
 
+
 const supabase = createClient(supabaseUrl, supabaseKey);
+
 
 // CORS Configuration
 const corsOptions = {
@@ -27,10 +32,12 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 };
 
+
 // Middleware
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -40,6 +47,7 @@ app.use((req, res, next) => {
   }
   next();
 });
+
 
 // Root route
 app.get('/', (req, res) => {
@@ -85,6 +93,7 @@ app.get('/', (req, res) => {
   });
 });
 
+
 // Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({
@@ -95,32 +104,56 @@ app.get('/api/test', (req, res) => {
   });
 });
 
+
 // ========================================
 // ROUTE LOADING - ORDER MATTERS!
 // ========================================
 
-// ✅ LOAD LEAVE ROUTES FIRST (highest priority)
+// ✅ LOAD ADMIN ROUTES ONLY (TESTING)
 try {
-  const employeeLeaveRoutes = require('./routes/employeeLeaveRoutes');
-  app.use('/api', employeeLeaveRoutes);
-  console.log('✅ Employee Leave routes loaded successfully');
-} catch (error) {
-  console.log('⚠️ Employee Leave routes not found:', error.message);
-}
-
-// ✅ LOAD ADMIN AND EMPLOYEE CRUD ROUTES
-try {
-  const adminRoutes = require('./routes/adminRoutes');
-  const employeeRoutes = require('./routes/employeeRoutes');
+  console.log('🔍 Attempting to load admin routes...');
+  const adminRoutes = require('./routes/admin/adminRoutes');
+  console.log('✅ adminRoutes file loaded successfully');
   
   app.use('/api/admin', adminRoutes);
-  app.use('/api/employees', employeeRoutes);
-  console.log('✅ Admin and Employee routes loaded successfully');
+  console.log('✅ Admin routes mounted at /api/admin');
 } catch (error) {
-  console.log('⚠️ Admin/Employee routes error:', error.message);
+  console.error('❌ Admin routes error:', error.message);
+  console.error('Stack:', error.stack);
 }
 
-// ✅ LOAD ATTENDANCE ROUTES (MUST BE AFTER LEAVE ROUTES)
+// ✅ LOAD EMPLOYEE ROUTES
+try {
+  console.log('🔍 Attempting to load employee routes...');
+  const employeeRoute = require('./routes/admin/employeeRoute');
+  console.log('✅ employeeRoute file loaded successfully');
+  
+  app.use('/api/employee', employeeRoute);
+  console.log('✅ Employee routes mounted at /api/employee');
+} catch (error) {
+  console.error('❌ Employee routes error:', error.message);
+  console.error('Stack:', error.stack);
+}
+
+// ⚠️ TEMPORARILY COMMENTED OUT - OTHER ROUTES
+/*
+try {
+  const adminSettings = require('./routes/admin/adminSettings');
+  const employeeLeaveRoute = require('./routes/admin/employeeLeaveRoute');
+  const employeeSiteManagement = require('./routes/admin/employeeSiteManagement');
+  
+  app.use('/api/adminSetting', adminSettings);
+  app.use('/api/employeeLeave', employeeLeaveRoute);
+  app.use('/api/employeeSite', employeeSiteManagement);
+  
+  console.log('✅ All admin routes loaded successfully');
+} catch (error) {
+  console.log('⚠️ Admin routes error:', error.message);
+}
+*/
+
+// ⚠️ TEMPORARILY COMMENTED OUT - ATTENDANCE ROUTES
+/*
 try {
   const attendanceRoutes = require('./routes/attendanceRoutes');
   app.use('/api', attendanceRoutes);
@@ -128,15 +161,8 @@ try {
 } catch (error) {
   console.log('⚠️ Attendance routes error:', error.message);
 }
+*/
 
-// ✅ LOAD SITE ASSIGNMENT ROUTES
-try {
-  const siteAssignmentRoutes = require('./routes/siteAssignmentRoutes');
-  app.use('/api/site-assignments', siteAssignmentRoutes);
-  console.log('✅ Site Assignment routes loaded successfully');
-} catch (error) {
-  console.log('⚠️ Site Assignment routes not found:', error.message);
-}
 
 // Handle unmatched routes
 app.use('*', (req, res) => {
@@ -181,6 +207,7 @@ app.use('*', (req, res) => {
   });
 });
 
+
 // Start server
 app.listen(PORT, () => {
   console.log(`\n${'='.repeat(60)}`);
@@ -189,13 +216,14 @@ app.listen(PORT, () => {
   
   console.log(`📡 API ENDPOINTS:\n`);
   
-  console.log(`👨‍💼 ADMIN ROUTES:`);
+  console.log(`👨‍💼 ADMIN ROUTES (ACTIVE):`);
   console.log(`   POST   http://localhost:${PORT}/api/admin`);
   console.log(`   GET    http://localhost:${PORT}/api/admin`);
   console.log(`   GET    http://localhost:${PORT}/api/admin/:id`);
   console.log(`   PUT    http://localhost:${PORT}/api/admin/:id`);
   console.log(`   DELETE http://localhost:${PORT}/api/admin/:id`);
   
+
   console.log(`\n👤 EMPLOYEE ROUTES:`);
   console.log(`   POST   http://localhost:${PORT}/api/employees`);
   console.log(`   GET    http://localhost:${PORT}/api/employees`);
@@ -203,6 +231,7 @@ app.listen(PORT, () => {
   console.log(`   PUT    http://localhost:${PORT}/api/employees/:id`);
   console.log(`   DELETE http://localhost:${PORT}/api/employees/:id`);
   
+  /*
   console.log(`\n📋 EMPLOYEE LEAVE ROUTES:`);
   console.log(`   POST   http://localhost:${PORT}/api/employee/leave-request`);
   console.log(`   GET    http://localhost:${PORT}/api/employee/leaves/:employee_id`);
@@ -223,9 +252,11 @@ app.listen(PORT, () => {
   console.log(`   GET    http://localhost:${PORT}/api/attendance/employee/:employee_id`);
   console.log(`   GET    http://localhost:${PORT}/api/attendance/date/:date`);
   console.log(`   DELETE http://localhost:${PORT}/api/attendance/:id`);
+  */
   
-  console.log(`\n✨ System ready for testing!`);
+  console.log(`\n✨ System ready for testing! (ADMIN ROUTES ONLY)`);
   console.log(`${'='.repeat(60)}\n`);
 });
+
 
 module.exports = app;
